@@ -1,0 +1,1025 @@
+{
+  "name": "POC - FTP + Corsight Face Check",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "1",
+      "name": "Cron Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 2,
+      "position": [
+        -1560,
+        -120
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "2",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1560,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "passThrough"
+      },
+      "id": "3",
+      "name": "Start (Cron or Manual)",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [
+        -1360,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.CORSIGHT_BASE_URL_AUTH}}/login",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"username\": \"{{$env.CORSIGHT_USERNAME}}\",\n  \"password\": \"{{$env.CORSIGHT_PASSWORD}}\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "4",
+      "name": "Corsight Login",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1160,
+        -40
+      ],
+      "notes": "Autentica no Corsight Auth e obtém Bearer token.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json.statusCode}}",
+              "operation": "equal",
+              "value2": 200
+            }
+          ]
+        }
+      },
+      "id": "5",
+      "name": "Check Login Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -960,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "throw new Error(`Corsight login failed. HTTP ${$json.statusCode}. Body: ${JSON.stringify($json.body || {})}`);"
+      },
+      "id": "6",
+      "name": "Stop - Login Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -740,
+        120
+      ],
+      "notes": "Falha de autenticação deve parar o workflow com erro explícito.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "list",
+        "path": "={{$env.FTP_INPUT_PATH}}",
+        "options": {
+          "host": "={{$env.FTP_HOST}}",
+          "port": "={{Number($env.FTP_PORT || 21)}}",
+          "user": "={{$env.FTP_USER}}",
+          "password": "={{$env.FTP_PASSWORD}}"
+        }
+      },
+      "id": "7",
+      "name": "List FTP Files",
+      "type": "n8n-nodes-base.ftp",
+      "typeVersion": 1,
+      "position": [
+        -740,
+        -120
+      ],
+      "notes": "Lista arquivos do diretório de entrada no FTP.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const token = $item(0).$node['Corsight Login'].json.body?.access_token || $item(0).$node['Corsight Login'].json.body?.token;\nif (!token) throw new Error('Token não encontrado na resposta de login.');\n\nconst inputPath = $env.FTP_INPUT_PATH || '/input';\nconst out = [];\n\nfor (const item of items) {\n  const row = item.json;\n  const name = row.name || row.file || row.fileName || '';\n  const isDir = row.type === 'd' || row.isDirectory === true || row.directory === true;\n  if (isDir) continue;\n\n  const lower = name.toLowerCase();\n  if (!lower.endsWith('.jpg') && !lower.endsWith('.jpeg') && !lower.endsWith('.png')) continue;\n\n  out.push({\n    json: {\n      token,\n      file_name: name,\n      source_path: `${inputPath.replace(/\\/$/, '')}/${name}`,\n      listing_meta: row\n    }\n  });\n}\n\nreturn out;"
+      },
+      "id": "8",
+      "name": "Filter Image Files + Attach Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -520,
+        -120
+      ],
+      "notes": "Filtra somente .jpg/.jpeg/.png, ignora diretórios e anexa token em cada item.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "batchSize": 1
+      },
+      "id": "9",
+      "name": "Process Each FTP Image",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -300,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "path": "={{$json.source_path}}",
+        "binaryPropertyName": "image",
+        "options": {
+          "host": "={{$env.FTP_HOST}}",
+          "port": "={{Number($env.FTP_PORT || 21)}}",
+          "user": "={{$env.FTP_USER}}",
+          "password": "={{$env.FTP_PASSWORD}}"
+        }
+      },
+      "id": "10",
+      "name": "Download FTP Image",
+      "type": "n8n-nodes-base.ftp",
+      "typeVersion": 1,
+      "position": [
+        -100,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const bin = $binary.image;\nif (!bin?.data) throw new Error('Imagem binária não encontrada em $binary.image');\n\nconst imageBase64 = bin.data;\n\nreturn [{\n  json: {\n    ...$json,\n    image_base64: imageBase64\n  }\n}];"
+      },
+      "id": "11",
+      "name": "Convert Image To Base64",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        120,
+        -120
+      ],
+      "notes": "No n8n, binário já fica em base64 no campo binary.data.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.CORSIGHT_BASE_URL_POI}}/poi_db/face/detect",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$json.token}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"get_crops\": true,\n  \"imgs\": [\n    {\n      \"img\": \"{{$json.image_base64}}\"\n    }\n  ]\n}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "12",
+      "name": "Detect Face",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        340,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const detect = $json;\nconst ctx = $item(0).$node['Convert Image To Base64'].json;\n\nconst statusCode = detect.statusCode;\nconst body = detect.body || {};\nif (statusCode < 200 || statusCode >= 300) {\n  return [{ json: { ...ctx, status: 'error', error_stage: 'detect', error_http: statusCode, error_body: body } }];\n}\n\nconst faces = body.faces || body.detections || body.results || [];\nif (!Array.isArray(faces) || faces.length === 0) {\n  return [{ json: { ...ctx, status: 'no_face_detected', detect_raw: body } }];\n}\n\nfunction bboxArea(face) {\n  const bb = face.bbox || face.bounding_box || {};\n  const w = Math.max(0, (bb.w ?? bb.width ?? 0));\n  const h = Math.max(0, (bb.h ?? bb.height ?? 0));\n  return w * h;\n}\n\nconst ranked = [...faces].sort((a, b) => {\n  const dsA = a.detection_score ?? a.score ?? 0;\n  const dsB = b.detection_score ?? b.score ?? 0;\n  if (dsB !== dsA) return dsB - dsA;\n  return bboxArea(b) - bboxArea(a);\n});\n\nconst best = ranked[0];\nconst cropBase64 = best.crop_img || best.crop || best.face_crop || best.img_crop;\nif (!cropBase64) {\n  return [{ json: { ...ctx, status: 'error', error_stage: 'select_detection', error_body: body, error_message: 'Crop não encontrado na melhor detecção' } }];\n}\n\nreturn [{\n  json: {\n    ...ctx,\n    status: 'face_detected',\n    detect_raw: body,\n    detection_score: best.detection_score ?? best.score ?? null,\n    selected_face: best,\n    crop_base64: cropBase64\n  }\n}];"
+      },
+      "id": "13",
+      "name": "Check Detections + Select Best Detection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        580,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.status}}",
+              "operation": "equal",
+              "value2": "face_detected"
+            }
+          ]
+        }
+      },
+      "id": "14",
+      "name": "Route After Detection",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        820,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.status}}",
+              "operation": "equal",
+              "value2": "no_face_detected"
+            }
+          ]
+        }
+      },
+      "id": "15",
+      "name": "Was No Face Detected?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1060,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.CORSIGHT_BASE_URL_POI}}/poi_db/face/analyze",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$json.token}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"image_payload\": {\n    \"img\": \"{{$json.crop_base64}}\",\n    \"detect\": false,\n    \"use_detector_lms\": true,\n    \"fail_on_multiple_faces\": true\n  },\n  \"get_signature_payload\": false\n}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "16",
+      "name": "Analyze Crop Quality",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1060,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const analyze = $json;\nconst ctx = $item(0).$node['Check Detections + Select Best Detection'].json;\n\nif (analyze.statusCode < 200 || analyze.statusCode >= 300) {\n  return [{ json: { ...ctx, status: 'error', error_stage: 'analyze', error_http: analyze.statusCode, error_body: analyze.body } }];\n}\n\nconst body = analyze.body || {};\nconst validFace = body.valid_face === true;\n\nif (!validFace) {\n  return [{ json: { ...ctx, status: 'invalid_face', valid_face: false, analyze_raw: body } }];\n}\n\nreturn [{ json: { ...ctx, status: 'valid_face', valid_face: true, analyze_raw: body } }];"
+      },
+      "id": "17",
+      "name": "Check Face Validity",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.status}}",
+              "operation": "equal",
+              "value2": "valid_face"
+            }
+          ]
+        }
+      },
+      "id": "18",
+      "name": "Route After Analyze",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1500,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $json;\nconst references = [\n  { reference_id: 'ref_1', person_name: 'Pessoa de Interesse', face_base64: 'BASE64_REFERENCE_1' },\n  { reference_id: 'ref_2', person_name: 'Pessoa de Interesse', face_base64: 'BASE64_REFERENCE_2' }\n];\n\nreturn references.map((ref) => ({\n  json: {\n    ...ctx,\n    reference_id: ref.reference_id,\n    person_name: ref.person_name,\n    reference_face_base64: ref.face_base64\n  }\n}));"
+      },
+      "id": "19",
+      "name": "Load Reference Faces",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1720,
+        -360
+      ],
+      "notes": "Coleção simples de referências em Base64 para POC. Substituir placeholders BASE64_REFERENCE_X.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.CORSIGHT_BASE_URL_POI}}/poi_db/face/compare",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$json.token}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"face_ref\": {\n    \"image_payload\": {\n      \"img\": \"{{$json.reference_face_base64}}\",\n      \"detect\": false,\n      \"use_detector_lms\": true,\n      \"fail_on_multiple_faces\": true\n    }\n  },\n  \"face_test\": {\n    \"image_payload\": {\n      \"img\": \"{{$json.crop_base64}}\",\n      \"detect\": false,\n      \"use_detector_lms\": true,\n      \"fail_on_multiple_faces\": true\n    }\n  },\n  \"convert_to_conf\": true\n}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "20",
+      "name": "Compare Against References",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1940,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = [];\nfor (let i = 0; i < items.length; i++) {\n  const cmp = items[i].json;\n  const ctx = $item(i).$node['Load Reference Faces'].json;\n\n  if (cmp.statusCode < 200 || cmp.statusCode >= 300) {\n    return [{\n      json: {\n        ...ctx,\n        status: 'error',\n        error_stage: 'compare',\n        error_http: cmp.statusCode,\n        error_body: cmp.body,\n      }\n    }];\n  }\n\n  const body = cmp.body || {};\n  const score = Number(body.match_confidence ?? body.score ?? 0);\n\n  results.push({\n    reference_id: ctx.reference_id,\n    person_name: ctx.person_name,\n    match_confidence: score,\n    raw: body\n  });\n}\n\nresults.sort((a, b) => b.match_confidence - a.match_confidence);\nconst best = results[0] || null;\nconst root = $item(0).$node['Load Reference Faces'].json;\n\nlet classification = 'no_match';\nif (best && best.match_confidence >= 85) classification = 'strong_match';\nelse if (best && best.match_confidence >= 75) classification = 'manual_review';\n\nreturn [{\n  json: {\n    ...root,\n    status: 'classified',\n    compared_references: results.length,\n    best_score: best ? best.match_confidence : 0,\n    best_reference_id: best ? best.reference_id : null,\n    classification,\n    compare_results: results\n  }\n}];"
+      },
+      "id": "21",
+      "name": "Aggregate Scores + Classify Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.status}}",
+              "operation": "equal",
+              "value2": "error"
+            }
+          ]
+        }
+      },
+      "id": "22",
+      "name": "Is Error Status?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2380,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "rename",
+        "oldPath": "={{$json.source_path}}",
+        "newPath": "={{($env.FTP_NOFACE_PATH || '/noface').replace(/\/$/, '') + '/' + $json.file_name}}",
+        "options": {
+          "host": "={{$env.FTP_HOST}}",
+          "port": "={{Number($env.FTP_PORT || 21)}}",
+          "user": "={{$env.FTP_USER}}",
+          "password": "={{$env.FTP_PASSWORD}}"
+        }
+      },
+      "id": "23",
+      "name": "Move To No Face Folder",
+      "type": "n8n-nodes-base.ftp",
+      "typeVersion": 1,
+      "position": [
+        1280,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "rename",
+        "oldPath": "={{$json.source_path}}",
+        "newPath": "={{($env.FTP_ERROR_PATH || '/error').replace(/\/$/, '') + '/' + $json.file_name}}",
+        "options": {
+          "host": "={{$env.FTP_HOST}}",
+          "port": "={{Number($env.FTP_PORT || 21)}}",
+          "user": "={{$env.FTP_USER}}",
+          "password": "={{$env.FTP_PASSWORD}}"
+        }
+      },
+      "id": "24",
+      "name": "Move To Error Folder",
+      "type": "n8n-nodes-base.ftp",
+      "typeVersion": 1,
+      "position": [
+        2380,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.classification}}",
+              "operation": "equal",
+              "value2": "strong_match"
+            }
+          ]
+        }
+      },
+      "id": "25",
+      "name": "Is Strong Match?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2600,
+        -520
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.classification}}",
+              "operation": "equal",
+              "value2": "manual_review"
+            }
+          ]
+        }
+      },
+      "id": "26",
+      "name": "Is Manual Review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2820,
+        -380
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "rename",
+        "oldPath": "={{$json.source_path}}",
+        "newPath": "={{($env.FTP_MATCH_PATH || '/match').replace(/\/$/, '') + '/' + $json.file_name}}",
+        "options": {
+          "host": "={{$env.FTP_HOST}}",
+          "port": "={{Number($env.FTP_PORT || 21)}}",
+          "user": "={{$env.FTP_USER}}",
+          "password": "={{$env.FTP_PASSWORD}}"
+        }
+      },
+      "id": "27",
+      "name": "Move To Match Folder",
+      "type": "n8n-nodes-base.ftp",
+      "typeVersion": 1,
+      "position": [
+        2820,
+        -600
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "rename",
+        "oldPath": "={{$json.source_path}}",
+        "newPath": "={{($env.FTP_REVIEW_PATH || '/review').replace(/\/$/, '') + '/' + $json.file_name}}",
+        "options": {
+          "host": "={{$env.FTP_HOST}}",
+          "port": "={{Number($env.FTP_PORT || 21)}}",
+          "user": "={{$env.FTP_USER}}",
+          "password": "={{$env.FTP_PASSWORD}}"
+        }
+      },
+      "id": "28",
+      "name": "Move To Review Folder",
+      "type": "n8n-nodes-base.ftp",
+      "typeVersion": 1,
+      "position": [
+        3040,
+        -420
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "rename",
+        "oldPath": "={{$json.source_path}}",
+        "newPath": "={{($env.FTP_PROCESSED_PATH || '/processed').replace(/\/$/, '') + '/' + $json.file_name}}",
+        "options": {
+          "host": "={{$env.FTP_HOST}}",
+          "port": "={{Number($env.FTP_PORT || 21)}}",
+          "user": "={{$env.FTP_USER}}",
+          "password": "={{$env.FTP_PASSWORD}}"
+        }
+      },
+      "id": "29",
+      "name": "Move To Processed Folder",
+      "type": "n8n-nodes-base.ftp",
+      "typeVersion": 1,
+      "position": [
+        3040,
+        -220
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    file_name: $json.file_name,\n    source_path: $json.source_path,\n    detection_score: $json.detection_score ?? null,\n    valid_face: $json.valid_face ?? null,\n    best_score: $json.best_score ?? null,\n    best_reference_id: $json.best_reference_id ?? null,\n    classification: $json.classification ?? $json.status,\n    status: $json.status,\n    error_stage: $json.error_stage ?? null,\n    error_http: $json.error_http ?? null,\n    processed_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "30",
+      "name": "Final Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3260,
+        -360
+      ],
+      "notes": "Resumo final do item processado (pronto para futuro envio a DB/Webhook/Email).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $json;\nctx.status = 'error';\nif (!ctx.error_stage) ctx.error_stage = 'routing_or_analyze';\nreturn [{ json: ctx }];"
+      },
+      "id": "31",
+      "name": "Normalize Error Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1720,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "passThrough"
+      },
+      "id": "32",
+      "name": "Continue Batch",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [
+        3480,
+        -120
+      ]
+    }
+  ],
+  "connections": {
+    "Cron Trigger": {
+      "main": [
+        [
+          {
+            "node": "Start (Cron or Manual)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Start (Cron or Manual)",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Start (Cron or Manual)": {
+      "main": [
+        [
+          {
+            "node": "Corsight Login",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Corsight Login": {
+      "main": [
+        [
+          {
+            "node": "Check Login Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Login Success": {
+      "main": [
+        [
+          {
+            "node": "List FTP Files",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop - Login Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List FTP Files": {
+      "main": [
+        [
+          {
+            "node": "Filter Image Files + Attach Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Image Files + Attach Token": {
+      "main": [
+        [
+          {
+            "node": "Process Each FTP Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Each FTP Image": {
+      "main": [
+        [
+          {
+            "node": "Download FTP Image",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Download FTP Image": {
+      "main": [
+        [
+          {
+            "node": "Convert Image To Base64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert Image To Base64": {
+      "main": [
+        [
+          {
+            "node": "Detect Face",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Face": {
+      "main": [
+        [
+          {
+            "node": "Check Detections + Select Best Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Detections + Select Best Detection": {
+      "main": [
+        [
+          {
+            "node": "Route After Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route After Detection": {
+      "main": [
+        [
+          {
+            "node": "Analyze Crop Quality",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Was No Face Detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Was No Face Detected?": {
+      "main": [
+        [
+          {
+            "node": "Move To No Face Folder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normalize Error Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Crop Quality": {
+      "main": [
+        [
+          {
+            "node": "Check Face Validity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Face Validity": {
+      "main": [
+        [
+          {
+            "node": "Route After Analyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route After Analyze": {
+      "main": [
+        [
+          {
+            "node": "Load Reference Faces",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normalize Error Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Reference Faces": {
+      "main": [
+        [
+          {
+            "node": "Compare Against References",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compare Against References": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Scores + Classify Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Scores + Classify Result": {
+      "main": [
+        [
+          {
+            "node": "Is Error Status?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Error Status?": {
+      "main": [
+        [
+          {
+            "node": "Move To Error Folder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Strong Match?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Strong Match?": {
+      "main": [
+        [
+          {
+            "node": "Move To Match Folder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Manual Review?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Manual Review?": {
+      "main": [
+        [
+          {
+            "node": "Move To Review Folder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Move To Processed Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move To No Face Folder": {
+      "main": [
+        [
+          {
+            "node": "Final Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Error Status": {
+      "main": [
+        [
+          {
+            "node": "Move To Error Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move To Error Folder": {
+      "main": [
+        [
+          {
+            "node": "Final Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move To Match Folder": {
+      "main": [
+        [
+          {
+            "node": "Final Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move To Review Folder": {
+      "main": [
+        [
+          {
+            "node": "Final Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move To Processed Folder": {
+      "main": [
+        [
+          {
+            "node": "Final Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final Output": {
+      "main": [
+        [
+          {
+            "node": "Continue Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continue Batch": {
+      "main": [
+        [
+          {
+            "node": "Process Each FTP Image",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "id": "corsight-ftp-face-check-poc"
+}
